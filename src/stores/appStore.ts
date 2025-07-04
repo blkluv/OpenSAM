@@ -21,9 +21,30 @@ const DEFAULT_LLM_CONFIG: LLMConfig = {
   maxTokens: 2000,
 };
 
+// Get API keys from environment variables if available
+const getEnvApiKey = (provider: string) => {
+  // On client-side, we can only access NEXT_PUBLIC_ prefixed variables
+  if (typeof window !== 'undefined') {
+    switch (provider) {
+      case 'openai':
+        return process.env.NEXT_PUBLIC_OPENAI_API_KEY || '';
+      case 'anthropic':
+        return process.env.NEXT_PUBLIC_ANTHROPIC_API_KEY || '';
+      case 'huggingface':
+        return process.env.NEXT_PUBLIC_HUGGINGFACE_API_KEY || '';
+      default:
+        return '';
+    }
+  }
+  return ''; // Server-side, return empty
+};
+
 // Initial state
-const initialState: Partial<AppState> = {
-  llmConfig: DEFAULT_LLM_CONFIG,
+const initialState: AppState = {
+  llmConfig: {
+    ...DEFAULT_LLM_CONFIG,
+    apiKey: getEnvApiKey(DEFAULT_LLM_CONFIG.provider),
+  },
   llmProviders: {
     openai: { 
       models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'] 
@@ -54,7 +75,7 @@ const initialState: Partial<AppState> = {
   sidebarOpen: true,
   currentView: 'chat',
   theme: 'light',
-  samApiKey: '',
+  samApiKey: typeof window === 'undefined' ? '' : (process.env.NEXT_PUBLIC_SAM_API_KEY || ''),
   encryptionKey: '',
   settings: {
     autoSave: true,
@@ -114,7 +135,7 @@ interface AppStore extends AppState {
   resetStore: () => void;
   exportData: () => string;
   importData: (data: string) => void;
-  initializeStore: () => void;
+        initializeStore: () => Promise<void>;
 }
 
 // Create the store
@@ -135,6 +156,7 @@ export const useAppStore = create<AppStore>()(
             ...state.llmConfig, 
             provider,
             model: state.llmProviders[provider].models[0] || '',
+            apiKey: getEnvApiKey(provider) || state.llmConfig.apiKey, // Try to get from env first
           },
         })),
       
@@ -156,7 +178,10 @@ export const useAppStore = create<AppStore>()(
           // Test API call with minimal request
           const response = await fetch('/api/chat', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${llmConfig.apiKey}`
+            },
             body: JSON.stringify({
               model: `${llmConfig.provider}:${llmConfig.model}`,
               messages: [{ role: 'user', content: 'test' }],
@@ -375,7 +400,26 @@ export const useAppStore = create<AppStore>()(
         }
       },
       
-      initializeStore: () => {
+      initializeStore: async () => {
+        try {
+          // Fetch configuration from server
+          const response = await fetch('/api/config');
+          if (response.ok) {
+            const data = await response.json();
+            const config = data.config;
+            
+            // Update API keys if they're available on the server
+            const currentConfig = get().llmConfig;
+            if (config.openai.hasKey && !currentConfig.apiKey) {
+              set((state) => ({
+                llmConfig: { ...state.llmConfig, apiKey: 'server-configured' }
+              }));
+            }
+          }
+        } catch (error) {
+          console.error('Failed to fetch config:', error);
+        }
+        
         const state = get();
         
         // Generate encryption key if not present
@@ -442,5 +486,5 @@ export const useSettings = () => useAppStore((state) => state.settings);
 
 // Initialize store on first load
 if (typeof window !== 'undefined') {
-  useAppStore.getState().initializeStore();
+  useAppStore.getState().initializeStore().catch(console.error);
 }

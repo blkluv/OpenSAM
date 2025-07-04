@@ -1,4 +1,4 @@
-import { NextApiRequest, NextApiResponse } from 'next';
+import { NextRequest, NextResponse } from 'next/server';
 import { SAMOpportunity, SAMSearchFilters, SAMSearchResponse, EmbeddingRequest, EmbeddingResponse } from '@/types';
 import { cosineSimilarity } from '@/lib/utils';
 
@@ -19,8 +19,8 @@ const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 /**
  * Rate limiting for SAM.gov API calls
  */
-function checkSAMRateLimit(req: NextApiRequest): boolean {
-  const clientIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
+function checkSAMRateLimit(req: NextRequest): boolean {
+  const clientIp = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown';
   const now = Date.now();
   
   const clientData = samRateLimitMap.get(clientIp as string);
@@ -174,6 +174,43 @@ async function searchSAMOpportunities(
     params.append('active', filters.active.toString());
   }
   
+  // Enhanced search parameters
+  if (filters.entityName) {
+    params.append('entityName', filters.entityName);
+  }
+  
+  if (filters.contractVehicle) {
+    params.append('contractVehicle', filters.contractVehicle);
+  }
+  
+  if (filters.classificationCode) {
+    params.append('classificationCode', filters.classificationCode);
+  }
+  
+  if (filters.fundingSource) {
+    params.append('fundingSource', filters.fundingSource);
+  }
+  
+  if (filters.responseDeadline?.from) {
+    params.append('responseDeadlineFrom', filters.responseDeadline.from);
+  }
+  
+  if (filters.responseDeadline?.to) {
+    params.append('responseDeadlineTo', filters.responseDeadline.to);
+  }
+  
+  if (filters.estimatedValue?.min) {
+    params.append('estimatedValueMin', filters.estimatedValue.min.toString());
+  }
+  
+  if (filters.estimatedValue?.max) {
+    params.append('estimatedValueMax', filters.estimatedValue.max.toString());
+  }
+  
+  if (filters.hasAttachments) {
+    params.append('hasAttachments', 'true');
+  }
+  
   params.append('limit', Math.min(filters.limit || 50, 100).toString());
   params.append('offset', (filters.offset || 0).toString());
   
@@ -276,60 +313,74 @@ async function performSemanticSearch(
 /**
  * Main SAM search API handler
  */
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse
-) {
-  // Only allow GET requests
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-  
+export async function GET(req: NextRequest) {
   // Check rate limit
   if (!checkSAMRateLimit(req)) {
-    return res.status(429).json({ 
+    return NextResponse.json({ 
       error: 'Rate limit exceeded. Please try again later.' 
-    });
+    }, { status: 429 });
   }
   
   try {
-    const {
-      q: keyword,
-      startDate,
-      endDate,
-      naicsCode,
-      state,
-      agency,
-      type,
-      setAside,
-      active,
-      limit,
-      offset,
-      semantic,
-      provider = 'openai',
-      samApiKey,
-    } = req.query;
+    const { searchParams } = new URL(req.url);
+    const keyword = searchParams.get('q');
+    const startDate = searchParams.get('startDate');
+    const endDate = searchParams.get('endDate');
+    const naicsCode = searchParams.get('naicsCode');
+    const state = searchParams.get('state');
+    const agency = searchParams.get('agency');
+    const type = searchParams.get('type');
+    const setAside = searchParams.get('setAside');
+    const active = searchParams.get('active');
+    const limit = searchParams.get('limit');
+    const offset = searchParams.get('offset');
+    const semantic = searchParams.get('semantic');
+    const provider = searchParams.get('provider') || 'openai';
+    const samApiKey = searchParams.get('samApiKey');
+    const entityName = searchParams.get('entityName');
+    const contractVehicle = searchParams.get('contractVehicle');
+    const classificationCode = searchParams.get('classificationCode');
+    const fundingSource = searchParams.get('fundingSource');
+    const responseDeadlineFrom = searchParams.get('responseDeadlineFrom');
+    const responseDeadlineTo = searchParams.get('responseDeadlineTo');
+    const estimatedValueMin = searchParams.get('estimatedValueMin');
+    const estimatedValueMax = searchParams.get('estimatedValueMax');
+    const hasAttachments = searchParams.get('hasAttachments');
     
     // Validate required parameters
     if (!samApiKey) {
-      return res.status(400).json({ 
+      return NextResponse.json({ 
         error: 'SAM API key is required' 
-      });
+      }, { status: 400 });
     }
     
     // Build search filters
     const filters: SAMSearchFilters = {
-      keyword: keyword as string,
-      startDate: startDate as string,
-      endDate: endDate as string,
-      naicsCode: naicsCode as string,
-      state: state as string,
-      agency: agency as string,
-      type: type as string,
-      setAside: setAside as string,
-      active: active ? active === 'true' : undefined,
-      limit: limit ? parseInt(limit as string) : 50,
-      offset: offset ? parseInt(offset as string) : 0,
+      keyword: keyword || undefined,
+      startDate: startDate || undefined,
+      endDate: endDate || undefined,
+      naicsCode: naicsCode || undefined,
+      state: state || undefined,
+      agency: agency || undefined,
+      type: type || undefined,
+      setAside: setAside || undefined,
+      active: active === 'true',
+      limit: limit ? parseInt(limit) : 50,
+      offset: offset ? parseInt(offset) : 0,
+      // Enhanced filters
+      entityName: entityName || undefined,
+      contractVehicle: contractVehicle || undefined,
+      classificationCode: classificationCode || undefined,
+      fundingSource: fundingSource || undefined,
+      responseDeadline: {
+        from: responseDeadlineFrom || undefined,
+        to: responseDeadlineTo || undefined,
+      },
+      estimatedValue: {
+        min: estimatedValueMin ? parseFloat(estimatedValueMin) : undefined,
+        max: estimatedValueMax ? parseFloat(estimatedValueMax) : undefined,
+      },
+      hasAttachments: hasAttachments === 'true',
     };
     
     // Create cache key
@@ -338,26 +389,29 @@ export default async function handler(
     // Check cache first
     const cachedResult = searchResultsCache.get(cacheKey);
     if (cachedResult && Date.now() - cachedResult.timestamp < CACHE_DURATION) {
-      return res.status(200).json({
+      return NextResponse.json({
         success: true,
         data: cachedResult.data,
         cached: true,
         timestamp: Date.now(),
-      });
+      }, { status: 200 });
     }
     
     // Search SAM.gov
-    const opportunities = await searchSAMOpportunities(filters, samApiKey as string);
+    if (!samApiKey) {
+      return NextResponse.json({ error: 'SAM API key is required' }, { status: 400 });
+    }
+    const opportunities = await searchSAMOpportunities(filters, samApiKey);
     
     // Perform semantic search if requested and query is provided
     let finalOpportunities = opportunities;
     if (semantic === 'true' && keyword) {
-      const llmApiKey = req.headers.authorization?.replace('Bearer ', '');
+      const llmApiKey = req.headers.get('authorization')?.replace('Bearer ', '');
       if (llmApiKey) {
         finalOpportunities = await performSemanticSearch(
           opportunities,
           keyword,
-          provider as string,
+          provider,
           llmApiKey
         );
       }
@@ -381,26 +435,26 @@ export default async function handler(
     searchResultsCache.set(cacheKey, { data: response, timestamp: Date.now() });
     
     // Return response
-    res.status(200).json({
+    return NextResponse.json({
       success: true,
       data: response,
       timestamp: Date.now(),
-    });
+    }, { status: 200 });
     
   } catch (error) {
     console.error('SAM search API error:', error);
     
     // Return appropriate error response
     if (error instanceof Error) {
-      res.status(500).json({ 
+      return NextResponse.json({ 
         error: error.message,
         timestamp: Date.now(),
-      });
+      }, { status: 500 });
     } else {
-      res.status(500).json({ 
+      return NextResponse.json({ 
         error: 'An unexpected error occurred',
         timestamp: Date.now(),
-      });
+      }, { status: 500 });
     }
   }
 }
@@ -419,11 +473,11 @@ setInterval(() => {
   }
   
   // Clean search results cache
-  for (const [key, value] of searchResultsCache.entries()) {
+  Array.from(searchResultsCache.entries()).forEach(([key, value]) => {
     if (now - value.timestamp > CACHE_DURATION) {
       searchResultsCache.delete(key);
     }
-  }
+  });
 }, 5 * 60 * 1000); // Run every 5 minutes
 
 export { SAM_RATE_LIMIT_WINDOW, SAM_RATE_LIMIT_MAX_REQUESTS };

@@ -59,6 +59,13 @@ export default function Dashboard() {
   useEffect(() => {
     const initializeApp = async () => {
       try {
+        // Debug environment variables
+        console.log('Environment check:', {
+          NEXT_PUBLIC_OPENAI_API_KEY: process.env.NEXT_PUBLIC_OPENAI_API_KEY ? 'Set' : 'Not set',
+          OPENAI_API_KEY: process.env.OPENAI_API_KEY ? 'Set' : 'Not set',
+          llmConfig: llmConfig
+        });
+        
         // Initialize store and validate configuration
         await new Promise(resolve => setTimeout(resolve, 1000)); // Simulate initialization
         setIsLoading(false);
@@ -69,7 +76,7 @@ export default function Dashboard() {
     };
 
     initializeApp();
-  }, []);
+  }, [llmConfig]);
 
   // Handle API key setup
   const handleApiKeySetup = async (provider: string, apiKey: string) => {
@@ -288,6 +295,70 @@ export default function Dashboard() {
 
 // Chat View Component
 function ChatView() {
+  const [inputMessage, setInputMessage] = useState('');
+  const [messages, setMessages] = useState<Array<{role: 'user' | 'assistant', content: string}>>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const llmConfig = useLLMConfig();
+
+  const sendMessage = async () => {
+    if (!inputMessage.trim() || !llmConfig.apiKey) return;
+
+    const userMessage = { role: 'user' as const, content: inputMessage };
+    setMessages(prev => [...prev, userMessage]);
+    setInputMessage('');
+    setIsLoading(true);
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${llmConfig.apiKey}`
+        },
+        body: JSON.stringify({
+          model: `${llmConfig.provider}:${llmConfig.model}`,
+          messages: [...messages, userMessage],
+          context: {
+            temperature: llmConfig.temperature || 0.7,
+            maxTokens: llmConfig.maxTokens || 1000
+          }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (data.success && data.data) {
+        const assistantMessage = { 
+          role: 'assistant' as const, 
+          content: data.data.content 
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+      } else {
+        throw new Error(data.error || 'Failed to get response');
+      }
+    } catch (error) {
+      console.error('Chat error:', error);
+      const errorMessage = { 
+        role: 'assistant' as const, 
+        content: `Error: ${error instanceof Error ? error.message : 'Failed to send message'}` 
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
   return (
     <div className="max-w-4xl mx-auto">
       <Card>
@@ -302,22 +373,62 @@ function ChatView() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            <div className="h-96 border border-opensam-gray-200 rounded-lg p-4 bg-opensam-gray-50">
-              <div className="flex items-center justify-center h-full text-opensam-gray-500">
-                <div className="text-center">
-                  <Bot className="h-12 w-12 mx-auto mb-2 text-opensam-gray-400" />
-                  <p>Start a conversation with the AI assistant</p>
-                  <p className="text-sm mt-1">Try asking about recent contract opportunities or market trends</p>
+            <div className="h-96 border border-opensam-gray-200 rounded-lg p-4 bg-opensam-gray-50 overflow-y-auto">
+              {messages.length === 0 ? (
+                <div className="flex items-center justify-center h-full text-opensam-gray-500">
+                  <div className="text-center">
+                    <Bot className="h-12 w-12 mx-auto mb-2 text-opensam-gray-400" />
+                    <p>Start a conversation with the AI assistant</p>
+                    <p className="text-sm mt-1">Try asking about recent contract opportunities or market trends</p>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="space-y-4">
+                  {messages.map((message, index) => (
+                    <div key={index} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[80%] p-3 rounded-lg ${
+                        message.role === 'user' 
+                          ? 'bg-opensam-black text-opensam-white' 
+                          : 'bg-opensam-gray-200 text-opensam-black'
+                      }`}>
+                        <p className="text-sm">{message.content}</p>
+                      </div>
+                    </div>
+                  ))}
+                  {isLoading && (
+                    <div className="flex justify-start">
+                      <div className="bg-opensam-gray-200 text-opensam-black p-3 rounded-lg">
+                        <div className="flex items-center space-x-2">
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-opensam-black"></div>
+                          <span className="text-sm">AI is thinking...</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex space-x-2">
               <Input
                 placeholder="Ask about SAM.gov opportunities..."
                 className="flex-1"
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onKeyPress={handleKeyPress}
+                disabled={isLoading || !llmConfig.apiKey}
               />
-              <Button>Send</Button>
+              <Button 
+                onClick={sendMessage}
+                disabled={isLoading || !inputMessage.trim() || !llmConfig.apiKey}
+              >
+                {isLoading ? 'Sending...' : 'Send'}
+              </Button>
             </div>
+            {!llmConfig.apiKey && (
+              <p className="text-sm text-red-500 text-center">
+                Please set your API key in the sidebar to start chatting
+              </p>
+            )}
           </div>
         </CardContent>
       </Card>

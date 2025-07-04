@@ -51,13 +51,21 @@ export interface SAMOpportunity {
   naicsDescription: string;
   classificationCode: string;
   active: boolean;
+  
+  // Enhanced award information
   award?: {
     date: string;
     number: string;
     amount: number;
     awardeeUeiSAM: string;
     awardee: string;
+    awardeeAddress?: string;
+    contractNumber?: string;
+    contractVehicle?: string;
+    fundingSource?: string;
   };
+  
+  // Enhanced contact information
   pointOfContact?: Array<{
     fax: string;
     type: string;
@@ -66,6 +74,8 @@ export interface SAMOpportunity {
     title: string;
     fullName: string;
   }>;
+  
+  // Enhanced location information
   placeOfPerformance?: {
     streetAddress: string;
     city: {
@@ -82,6 +92,7 @@ export interface SAMOpportunity {
       name: string;
     };
   };
+  
   organizationType: string;
   officeAddress?: {
     zipcode: string;
@@ -89,14 +100,36 @@ export interface SAMOpportunity {
     countryCode: string;
     state: string;
   };
+  
+  // Enhanced links and attachments
   links?: Array<{
     rel: string;
     href: string;
+    title?: string;
+    type?: string;
   }>;
+  attachments?: Array<{
+    name: string;
+    url: string;
+    size?: number;
+    type?: string;
+  }>;
+  
+  // Enhanced metadata
   uiLink: string;
   relevanceScore?: number;
   isFavorite?: boolean;
   tags?: string[];
+  
+  // New fields
+  estimatedValue?: number;
+  contractVehicle?: string;
+  fundingSource?: string;
+  entityName?: string;
+  hasAttachments?: boolean;
+  awardStatus?: 'pending' | 'awarded' | 'cancelled';
+  lastModified?: string;
+  solicitationNumber?: string;
 }
 
 export interface SAMSearchFilters {
@@ -111,6 +144,21 @@ export interface SAMSearchFilters {
   active?: boolean;
   limit?: number;
   offset?: number;
+  // New enhanced filters
+  entityName?: string;
+  contractVehicle?: string;
+  estimatedValue?: {
+    min?: number;
+    max?: number;
+  };
+  fundingSource?: string;
+  classificationCode?: string;
+  responseDeadline?: {
+    from?: string | undefined;
+    to?: string | undefined;
+  };
+  awardStatus?: 'pending' | 'awarded' | 'cancelled';
+  hasAttachments?: boolean;
 }
 
 export interface SAMSearchResponse {

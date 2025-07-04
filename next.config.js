@@ -1,10 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  swcMinify: true,
-  experimental: {
-    appDir: true,
-  },
   webpack: (config, { isServer }) => {
     // Fix for pdf-parse in client-side builds
     if (!isServer) {
@@ -19,6 +15,10 @@ const nextConfig = {
   },
   env: {
     CUSTOM_KEY: process.env.CUSTOM_KEY,
+    NEXT_PUBLIC_OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    NEXT_PUBLIC_ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    NEXT_PUBLIC_HUGGINGFACE_API_KEY: process.env.HUGGINGFACE_API_KEY,
+    NEXT_PUBLIC_SAM_API_KEY: process.env.SAM_API_KEY,
   },
   async headers() {
     return [

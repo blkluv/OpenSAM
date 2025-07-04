@@ -1,4 +1,4 @@
-import { NextApiRequest, NextApiResponse } from 'next';
+import { NextRequest, NextResponse } from 'next/server';
 import { LLMProvider, LLMMessage, LLMResponse } from '@/types';
 
 // Rate limiting configuration
@@ -53,8 +53,8 @@ Keep responses concise but comprehensive, and always consider the business conte
 /**
  * Rate limiting middleware
  */
-function checkRateLimit(req: NextApiRequest): boolean {
-  const clientIp = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
+function checkRateLimit(req: NextRequest): boolean {
+  const clientIp = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown';
   const now = Date.now();
   
   const clientData = rateLimitMap.get(clientIp as string);
@@ -255,64 +255,61 @@ async function callHuggingFace(
 /**
  * Main chat API handler
  */
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse
-) {
-  // Only allow POST requests
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-  
+export async function POST(req: NextRequest) {
   // Check rate limit
   if (!checkRateLimit(req)) {
-    return res.status(429).json({ 
+    return NextResponse.json({ 
       error: 'Rate limit exceeded. Please try again later.' 
-    });
+    }, { status: 429 });
   }
   
   try {
-    const { model, messages, context } = req.body;
+    const { model, messages, context } = await req.json();
     
     // Validate input
     if (!model || !messages || !Array.isArray(messages)) {
-      return res.status(400).json({ 
+      return NextResponse.json({ 
         error: 'Invalid request. Model and messages are required.' 
-      });
+      }, { status: 400 });
     }
     
     // Parse provider and model
     const [provider, modelName] = model.split(':');
     
     if (!provider || !modelName) {
-      return res.status(400).json({ 
+      return NextResponse.json({ 
         error: 'Invalid model format. Use "provider:model" format.' 
-      });
+      }, { status: 400 });
     }
     
     // Validate provider
     if (!['openai', 'anthropic', 'huggingface'].includes(provider)) {
-      return res.status(400).json({ 
+      return NextResponse.json({ 
         error: 'Invalid provider. Supported providers: openai, anthropic, huggingface.' 
-      });
+      }, { status: 400 });
     }
     
-    // Get API key from headers or context
-    const apiKey = req.headers.authorization?.replace('Bearer ', '') || 
-                  context?.apiKey;
+    // Get API key from headers, context, or server environment
+    let apiKey = req.headers.get('authorization')?.replace('Bearer ', '') || 
+                 context?.apiKey;
+    
+    // If API key is "server-configured", use environment variable
+    if (apiKey === 'server-configured') {
+      apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.HUGGINGFACE_API_KEY || '';
+    }
     
     if (!apiKey) {
-      return res.status(401).json({ 
+      return NextResponse.json({ 
         error: 'API key is required.' 
-      });
+      }, { status: 401 });
     }
     
     // Test mode for validation
     if (context?.test) {
-      return res.status(200).json({ 
+      return NextResponse.json({ 
         success: true, 
         message: 'API key validation successful' 
-      });
+      }, { status: 200 });
     }
     
     // Call appropriate LLM provider
@@ -354,26 +351,26 @@ export default async function handler(
     }
     
     // Return response
-    res.status(200).json({
+    return NextResponse.json({
       success: true,
       data: response,
       timestamp: Date.now(),
-    });
+    }, { status: 200 });
     
   } catch (error) {
     console.error('Chat API error:', error);
     
     // Return appropriate error response
     if (error instanceof Error) {
-      res.status(500).json({ 
+      return NextResponse.json({ 
         error: error.message,
         timestamp: Date.now(),
-      });
+      }, { status: 500 });
     } else {
-      res.status(500).json({ 
+      return NextResponse.json({ 
         error: 'An unexpected error occurred',
         timestamp: Date.now(),
-      });
+      }, { status: 500 });
     }
   }
 }
