@@ -231,5 +231,3 @@ export async function GET(req: NextRequest) {
     }
   }
 }
-
-export { SAM_RATE_LIMIT_WINDOW, SAM_RATE_LIMIT_MAX_REQUESTS }; 
