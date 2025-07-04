@@ -12,13 +12,13 @@ const LLM_CONFIGS = {
     baseUrl: 'https://api.openai.com/v1',
     chatEndpoint: '/chat/completions',
     headers: (apiKey: string) => ({
-      'Authorization': `Bearer ${apiKey}`,
+      Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     }),
   },
   anthropic: {
     baseUrl: 'https://api.anthropic.com/v1',
-    chatEndpoint: '/messages',
+    chatEndpoint: '/completions', // corrected endpoint to /completions
     headers: (apiKey: string) => ({
       'x-api-key': apiKey,
       'Content-Type': 'application/json',
@@ -27,9 +27,9 @@ const LLM_CONFIGS = {
   },
   huggingface: {
     baseUrl: 'https://api-inference.huggingface.co/models',
-    chatEndpoint: '', // Will be constructed per model
+    chatEndpoint: '', // constructed per model in callHuggingFace
     headers: (apiKey: string) => ({
-      'Authorization': `Bearer ${apiKey}`,
+      Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     }),
   },
@@ -54,29 +54,30 @@ Keep responses concise but comprehensive, and always consider the business conte
  * Rate limiting middleware
  */
 function checkRateLimit(req: NextRequest): boolean {
-  const clientIp = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || 'unknown';
+  const clientIp =
+    (req.headers.get('x-forwarded-for')?.split(',')[0].trim()) ||
+    req.headers.get('x-real-ip') ||
+    'unknown';
   const now = Date.now();
-  
-  const clientData = rateLimitMap.get(clientIp as string);
-  
+
+  const clientData = rateLimitMap.get(clientIp);
+
   if (!clientData) {
-    rateLimitMap.set(clientIp as string, { count: 1, timestamp: now });
+    rateLimitMap.set(clientIp, { count: 1, timestamp: now });
     return true;
   }
-  
-  // Reset if window has passed
+
   if (now - clientData.timestamp > RATE_LIMIT_WINDOW) {
-    rateLimitMap.set(clientIp as string, { count: 1, timestamp: now });
+    rateLimitMap.set(clientIp, { count: 1, timestamp: now });
     return true;
   }
-  
-  // Check if limit exceeded
+
   if (clientData.count >= RATE_LIMIT_MAX_REQUESTS) {
     return false;
   }
-  
-  // Increment count
-  clientData.count++;
+
+  // Increment count and update map
+  rateLimitMap.set(clientIp, { count: clientData.count + 1, timestamp: clientData.timestamp });
   return true;
 }
 
@@ -89,7 +90,7 @@ function formatOpenAIMessages(messages: LLMMessage[]): any[] {
     ...messages.map(msg => ({
       role: msg.role === 'assistant' ? 'assistant' : 'user',
       content: msg.content,
-    }))
+    })),
   ];
 }
 
@@ -97,13 +98,20 @@ function formatOpenAIMessages(messages: LLMMessage[]): any[] {
  * Format messages for Anthropic API
  */
 function formatAnthropicMessages(messages: LLMMessage[]): any {
-  const userMessages = messages.filter(msg => msg.role !== 'system');
+  // Anthropic expects prompt as a single string combining all messages
+  // We'll format as "Human:" and "Assistant:" and append system prompt at start
+
+  const conversation = messages
+    .filter(msg => msg.role !== 'system')
+    .map(msg => (msg.role === 'assistant' ? `Assistant: ${msg.content}` : `Human: ${msg.content}`))
+    .join('\n\n');
+
   return {
-    system: SYSTEM_PROMPT,
-    messages: userMessages.map(msg => ({
-      role: msg.role === 'assistant' ? 'assistant' : 'user',
-      content: msg.content,
-    }))
+    prompt: `${SYSTEM_PROMPT}\n\n${conversation}\n\nAssistant:`,
+    model: '', // will be set by caller
+    max_tokens_to_sample: 1000, // default, override if needed
+    temperature: 0.7,
+    stop_sequences: ['\nHuman:'],
   };
 }
 
@@ -111,18 +119,20 @@ function formatAnthropicMessages(messages: LLMMessage[]): any {
  * Format messages for Hugging Face API
  */
 function formatHuggingFaceMessages(messages: LLMMessage[]): any {
-  const conversationText = messages.map(msg => {
-    const prefix = msg.role === 'user' ? 'Human: ' : 'Assistant: ';
-    return prefix + msg.content;
-  }).join('\n\n');
-  
+  const conversationText = messages
+    .map(msg => {
+      const prefix = msg.role === 'user' ? 'Human: ' : 'Assistant: ';
+      return prefix + msg.content;
+    })
+    .join('\n\n');
+
   return {
     inputs: `${SYSTEM_PROMPT}\n\n${conversationText}\n\nAssistant:`,
     parameters: {
       max_new_tokens: 1000,
       temperature: 0.7,
       return_full_text: false,
-    }
+    },
   };
 }
 
@@ -130,14 +140,14 @@ function formatHuggingFaceMessages(messages: LLMMessage[]): any {
  * Call OpenAI API
  */
 async function callOpenAI(
-  messages: LLMMessage[], 
-  model: string, 
+  messages: LLMMessage[],
+  model: string,
   apiKey: string,
-  temperature: number = 0.7,
-  maxTokens: number = 1000
+  temperature = 0.7,
+  maxTokens = 1000
 ): Promise<LLMResponse> {
   const config = LLM_CONFIGS.openai;
-  
+
   const payload = {
     model,
     messages: formatOpenAIMessages(messages),
@@ -145,20 +155,20 @@ async function callOpenAI(
     max_tokens: maxTokens,
     stream: false,
   };
-  
+
   const response = await fetch(`${config.baseUrl}${config.chatEndpoint}`, {
     method: 'POST',
     headers: config.headers(apiKey),
     body: JSON.stringify(payload),
   });
-  
+
   if (!response.ok) {
-    const error = await response.json();
+    const error = await response.json().catch(() => ({}));
     throw new Error(`OpenAI API error: ${error.error?.message || response.statusText}`);
   }
-  
+
   const data = await response.json();
-  
+
   return {
     content: data.choices[0].message.content,
     usage: data.usage,
@@ -171,42 +181,40 @@ async function callOpenAI(
  * Call Anthropic API
  */
 async function callAnthropic(
-  messages: LLMMessage[], 
-  model: string, 
+  messages: LLMMessage[],
+  model: string,
   apiKey: string,
-  temperature: number = 0.7,
-  maxTokens: number = 1000
+  temperature = 0.7,
+  maxTokens = 1000
 ): Promise<LLMResponse> {
   const config = LLM_CONFIGS.anthropic;
-  
-  const payload = {
-    model,
-    max_tokens: maxTokens,
-    temperature,
-    ...formatAnthropicMessages(messages),
-  };
-  
+
+  const anthropicPayload = formatAnthropicMessages(messages);
+  anthropicPayload.model = model;
+  anthropicPayload.temperature = temperature;
+  anthropicPayload.max_tokens_to_sample = maxTokens;
+
   const response = await fetch(`${config.baseUrl}${config.chatEndpoint}`, {
     method: 'POST',
     headers: config.headers(apiKey),
-    body: JSON.stringify(payload),
+    body: JSON.stringify(anthropicPayload),
   });
-  
+
   if (!response.ok) {
-    const error = await response.json();
+    const error = await response.json().catch(() => ({}));
     throw new Error(`Anthropic API error: ${error.error?.message || response.statusText}`);
   }
-  
+
   const data = await response.json();
-  
+
   return {
-    content: data.content[0].text,
+    content: data.completion,
     usage: {
-      prompt_tokens: data.usage.input_tokens,
-      completion_tokens: data.usage.output_tokens,
-      total_tokens: data.usage.input_tokens + data.usage.output_tokens,
+      prompt_tokens: data.usage?.prompt_tokens || 0,
+      completion_tokens: data.usage?.completion_tokens || 0,
+      total_tokens: (data.usage?.prompt_tokens || 0) + (data.usage?.completion_tokens || 0),
     },
-    model: data.model,
+    model: data.model || model,
     provider: 'anthropic',
   };
 }
@@ -215,35 +223,35 @@ async function callAnthropic(
  * Call Hugging Face API
  */
 async function callHuggingFace(
-  messages: LLMMessage[], 
-  model: string, 
+  messages: LLMMessage[],
+  model: string,
   apiKey: string,
-  temperature: number = 0.7,
-  maxTokens: number = 1000
+  temperature = 0.7,
+  maxTokens = 1000
 ): Promise<LLMResponse> {
   const config = LLM_CONFIGS.huggingface;
-  
+
   const payload = formatHuggingFaceMessages(messages);
   payload.parameters.temperature = temperature;
   payload.parameters.max_new_tokens = maxTokens;
-  
+
   const response = await fetch(`${config.baseUrl}/${model}`, {
     method: 'POST',
     headers: config.headers(apiKey),
     body: JSON.stringify(payload),
   });
-  
+
   if (!response.ok) {
-    const error = await response.json();
+    const error = await response.json().catch(() => ({}));
     throw new Error(`Hugging Face API error: ${error.error || response.statusText}`);
   }
-  
+
   const data = await response.json();
-  
+
   return {
     content: Array.isArray(data) ? data[0].generated_text : data.generated_text,
     usage: {
-      prompt_tokens: 0, // HF doesn't provide token counts
+      prompt_tokens: 0, // Hugging Face does not provide token counts
       completion_tokens: 0,
       total_tokens: 0,
     },
@@ -256,124 +264,60 @@ async function callHuggingFace(
  * Main chat API handler
  */
 export async function POST(req: NextRequest) {
-  // Check rate limit
-  if (!checkRateLimit(req)) {
-    return NextResponse.json({ 
-      error: 'Rate limit exceeded. Please try again later.' 
-    }, { status: 429 });
-  }
-  
   try {
-    const { model, messages, context } = await req.json();
-    
-    // Validate input
-    if (!model || !messages || !Array.isArray(messages)) {
-      return NextResponse.json({ 
-        error: 'Invalid request. Model and messages are required.' 
-      }, { status: 400 });
+    // Rate limiting
+    if (!checkRateLimit(req)) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded. Try again later.' },
+        { status: 429 }
+      );
     }
-    
-    // Parse provider and model
-    const [provider, modelName] = model.split(':');
-    
-    if (!provider || !modelName) {
-      return NextResponse.json({ 
-        error: 'Invalid model format. Use "provider:model" format.' 
-      }, { status: 400 });
-    }
-    
-    // Validate provider
-    if (!['openai', 'anthropic', 'huggingface'].includes(provider)) {
-      return NextResponse.json({ 
-        error: 'Invalid provider. Supported providers: openai, anthropic, huggingface.' 
-      }, { status: 400 });
-    }
-    
-    // Get API key from headers, context, or server environment
-    let apiKey = req.headers.get('authorization')?.replace('Bearer ', '') || 
-                 context?.apiKey;
-    
-    // If API key is "server-configured", use environment variable
-    if (apiKey === 'server-configured') {
-      apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.HUGGINGFACE_API_KEY || '';
-    }
-    
+
+    // Parse request body
+    const body = await req.json();
+
+    const {
+      provider = 'openai',
+      model,
+      messages,
+      temperature = 0.7,
+      maxTokens = 1000,
+      apiKey,
+    } = body;
+
     if (!apiKey) {
-      return NextResponse.json({ 
-        error: 'API key is required.' 
-      }, { status: 401 });
+      return NextResponse.json({ error: 'Missing API key' }, { status: 400 });
     }
-    
-    // Test mode for validation
-    if (context?.test) {
-      return NextResponse.json({ 
-        success: true, 
-        message: 'API key validation successful' 
-      }, { status: 200 });
+
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return NextResponse.json({ error: 'Missing or invalid messages array' }, { status: 400 });
     }
-    
-    // Call appropriate LLM provider
-    let response: LLMResponse;
-    
-    switch (provider as LLMProvider) {
+
+    if (!model) {
+      return NextResponse.json({ error: 'Missing model parameter' }, { status: 400 });
+    }
+
+    let result: LLMResponse;
+
+    switch (provider.toLowerCase()) {
       case 'openai':
-        response = await callOpenAI(
-          messages, 
-          modelName, 
-          apiKey, 
-          context?.temperature, 
-          context?.maxTokens
-        );
+        result = await callOpenAI(messages, model, apiKey, temperature, maxTokens);
         break;
-        
       case 'anthropic':
-        response = await callAnthropic(
-          messages, 
-          modelName, 
-          apiKey, 
-          context?.temperature, 
-          context?.maxTokens
-        );
+        result = await callAnthropic(messages, model, apiKey, temperature, maxTokens);
         break;
-        
       case 'huggingface':
-        response = await callHuggingFace(
-          messages, 
-          modelName, 
-          apiKey, 
-          context?.temperature, 
-          context?.maxTokens
-        );
+        result = await callHuggingFace(messages, model, apiKey, temperature, maxTokens);
         break;
-        
       default:
-        throw new Error(`Unsupported provider: ${provider}`);
+        return NextResponse.json({ error: `Unsupported provider: ${provider}` }, { status: 400 });
     }
-    
-    // Return response
-    return NextResponse.json({
-      success: true,
-      data: response,
-      timestamp: Date.now(),
-    }, { status: 200 });
-    
-  } catch (error) {
-    console.error('Chat API error:', error);
-    
-    // Return appropriate error response
-    if (error instanceof Error) {
-      return NextResponse.json({ 
-        error: error.message,
-        timestamp: Date.now(),
-      }, { status: 500 });
-    } else {
-      return NextResponse.json({ 
-        error: 'An unexpected error occurred',
-        timestamp: Date.now(),
-      }, { status: 500 });
-    }
+
+    return NextResponse.json(result);
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error.message || 'Internal server error' },
+      { status: 500 }
+    );
   }
 }
-
-// Export rate limit configuration for testing
-export { RATE_LIMIT_WINDOW, RATE_LIMIT_MAX_REQUESTS };
